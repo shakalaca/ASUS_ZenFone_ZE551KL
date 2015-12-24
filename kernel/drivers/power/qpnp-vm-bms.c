@@ -261,6 +261,7 @@ struct qpnp_bms_chip {
 	struct bms_wakeup_source	vbms_soc_wake_source;
 	wait_queue_head_t		bms_wait_q;
 	struct delayed_work		monitor_soc_work;
+	struct delayed_work		batid_poweroff_work;
 	struct delayed_work		voltage_soc_timeout_work;
 	struct mutex			bms_data_mutex;
 	struct mutex			bms_device_mutex;
@@ -1670,6 +1671,7 @@ static int mapping_for_full_status(int last_soc)
 	int batt_voltage;
 	static bool batLow;
 	int rc;
+	static bool reported_flag;
 
 	rc=get_battery_voltage(the_chip,&batt_voltage);
 	if(rc)
@@ -1772,13 +1774,24 @@ static int mapping_for_full_status(int last_soc)
 		if (result == 0) {
 			ASUSEvtlog("[BAT] Low Voltage\n");
 			printk("[BAT] Low Voltage\n");
-			pr_debug("update bms_psy cap=0\n");
-			power_supply_changed(&the_chip->bms_psy);
+			//power_supply_changed(&the_chip->bms_psy);
 			batLow = true;
 			 }
 	} else{
 		if (result != 0) {
 			batLow = false;
+			reported_flag=0;
+			}
+		}
+
+	if((result==0)&&(reported_flag==0))
+		{
+		if (the_chip->batt_psy == NULL)
+			the_chip->batt_psy = power_supply_get_by_name("battery");
+		if(the_chip->batt_psy != NULL){
+			BAT_DBG("update bms_psy cap=0\n");
+			power_supply_changed(the_chip->batt_psy);
+			reported_flag=1;
 			}
 		}
 	return result;
@@ -1882,13 +1895,14 @@ static int report_vm_bms_soc(struct qpnp_bms_chip *chip)
 		 */
 		if (bms_wake_active(&chip->vbms_lv_wake_source) ||
 			(batt_temp <= chip->dt.cfg_low_temp_threshold))
+                {
 			soc_change = min((int)abs(chip->last_soc - soc),
-				time_since_last_change_sec);
-		else
+				time_since_last_change_sec/ SOC_CHANGE_PER_SEC_CRITICAL);
+                }else{
 			soc_change = min((int)abs(chip->last_soc - soc),
 				time_since_last_change_sec
 					/ SOC_CHANGE_PER_SEC);
-
+                }
 		if (chip->last_soc_unbound) {
 			chip->last_soc_unbound = false;
 		} else {
@@ -1899,9 +1913,12 @@ static int report_vm_bms_soc(struct qpnp_bms_chip *chip)
 			soc_change = min(1, soc_change);
 		}
 
-		if (soc < chip->last_soc && soc != 0)
+                        printk("%s:[bms]soc_change = %d\n",__func__,soc_change);
+		//if (soc < chip->last_soc && soc != 0)
+		if (soc < chip->last_soc && chip->last_soc != 0)
 			soc = chip->last_soc - soc_change;
-		if (soc > chip->last_soc && soc != 100)
+		//if (soc > chip->last_soc && soc != 100)
+		if (soc > chip->last_soc && chip->last_soc != 100)
 			soc = chip->last_soc + soc_change;
 	}
 
@@ -1926,6 +1943,27 @@ static int report_vm_bms_soc(struct qpnp_bms_chip *chip)
 			chip->last_soc, chip->calculated_soc,
 			soc, time_since_last_change_sec);
 
+
+        //BSP Ben do not report soc which is far too differ from shutdown_soc before boot_completed
+        if(boot_completed==0 && (!g_Charger_mode)){
+                printk("%s:[bms]boot_completed not yet\n",__func__);
+                if(chip->last_soc < 15 && chip->shutdown_soc_invalid ==0){
+                        if(abs(chip->last_soc - chip->shutdown_soc) > 3){
+                                printk("%s:[bms]last_soc<%d> and shutdown_soc<%d> difference too large!\n",__func__,chip->last_soc,chip->shutdown_soc);
+                                if(chip->last_soc > chip->shutdown_soc)
+                                {
+                                      chip->last_soc = chip->shutdown_soc + 3;
+                                }
+                                else{
+                                      chip->last_soc = chip->shutdown_soc - 3;
+                                }
+                        }
+                }
+        }
+
+        printk("%s:[bms]before mapping last_soc = <%d>\n",__func__,chip->last_soc);
+	result_soc = mapping_for_full_status(chip->last_soc);
+	printk("%s:[bms]Reported result_soc=%d\n",__func__ ,result_soc);
 	/*
 	 * Backup the actual ocv (last_ocv_uv) and not the
 	 * last_soc-interpolated ocv. This makes sure that
@@ -1934,10 +1972,7 @@ static int report_vm_bms_soc(struct qpnp_bms_chip *chip)
 	 * We do not want the algorithm to be based of a wrong
 	 * initial OCV.
 	 */
-	result_soc = mapping_for_full_status(chip->last_soc);
 	backup_ocv_soc(chip, chip->last_ocv_uv, result_soc);
-
-	pr_debug("Reported SOC=%d\n", chip->last_soc);
 
 	return result_soc;
 }
@@ -2507,29 +2542,56 @@ static void bms_new_battery_setup(struct qpnp_bms_chip *chip)
 	}
 }
 
+extern void do_msm_poweroff(void);
+static void batid_poweroff_work(struct work_struct *work)
+{
+	struct qpnp_bms_chip *chip = container_of(work,
+				struct qpnp_bms_chip,
+				batid_poweroff_work.work);
+	int rc;
+	u8 batt_pres;
+	bool present;
+	
+	if (chip->batt_pres_addr) {
+		rc = qpnp_read_wrapper(chip, &batt_pres,
+				chip->batt_pres_addr, 1);
+		printk("batid_poweroff_works:%x\n",batt_pres);
+		if (!rc && ((batt_pres & 0x03) == 0x03))
+			present = true;
+		else
+			present = false;
+	}
+	if(!present){
+		smb358_charging_toggle(FLAGS, false);
+		do_msm_poweroff();
+	}else
+		printk("skip batid_poweroff_works:%d\n",present);
+}
+
 static void battery_insertion_check(struct qpnp_bms_chip *chip)
 {
 	int present = (int)is_battery_present(chip);
         //BSP Ben shutdown when plug out battery      
-        extern void do_msm_poweroff(void);
-
+       
 	if (chip->battery_present != present) {
-		pr_debug("shadow_sts=%d status=%d\n",
+		printk("shadow_sts=%d status=%d\n",
 			chip->battery_present, present);
 		if (chip->battery_present != -EINVAL) {
 			if (present) {
 				/* new battery inserted */
 				bms_new_battery_setup(chip);
 				setup_vbat_monitoring(chip);
-				pr_debug("New battery inserted!\n");
+				printk("New battery inserted!\n");
 			} else {
 				/* battery removed */
-				reset_vbat_monitoring(chip);
-				pr_debug("Battery removed\n");
+				//reset_vbat_monitoring(chip);
+				printk("Battery removed\n");
                                 /* BSP Ben
                                 * Shutdown when plug out batt
                                 */
-                                do_msm_poweroff();
+				   schedule_delayed_work(&chip->batid_poweroff_work,msecs_to_jiffies(500));
+				   return;
+                                //do_msm_poweroff();
 			}
 		}
 		chip->battery_present = present;
@@ -4198,6 +4260,7 @@ static ssize_t batt_switch_name(struct switch_dev *sdev, char *buf)
 
 	return sprintf(buf, "%s%c%s%s%s%d\n", bat_s1, bat_type, bat_s2, bat_date, bat_s3, bat_id);
 }
+
 static int qpnp_vm_bms_probe(struct spmi_device *spmi)
 {
 	struct qpnp_bms_chip *chip;
@@ -4301,6 +4364,7 @@ static int qpnp_vm_bms_probe(struct spmi_device *spmi)
 	INIT_DELAYED_WORK(&chip->voltage_soc_timeout_work,
 					voltage_soc_timeout_work);
 
+	INIT_DELAYED_WORK(&chip->batid_poweroff_work, batid_poweroff_work);
 	bms_init_defaults(chip);
 	bms_load_hw_defaults(chip);
 
@@ -4447,6 +4511,7 @@ static int qpnp_vm_bms_remove(struct spmi_device *spmi)
 	struct qpnp_bms_chip *chip = dev_get_drvdata(&spmi->dev);
 
 	cancel_delayed_work_sync(&chip->monitor_soc_work);
+	cancel_delayed_work_sync(&chip->batid_poweroff_work);
 	debugfs_remove_recursive(chip->debug_root);
 	device_destroy(chip->bms_class, chip->dev_no);
 	cdev_del(&chip->bms_cdev);

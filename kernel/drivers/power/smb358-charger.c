@@ -1518,12 +1518,13 @@ void SET_VCH_VALUE(struct work_struct *dat){
 extern bool g_Charger_mode;
 extern bool g_bat_full;
 extern int get_bms_calculated_soc(int *rsoc);
+static bool charger_mode_cable_out = false;
 void LED_ChargerMode_Set(struct work_struct *dat){
 	int ret = 0;
 	int cap;
 	static uint8_t OldLedType = 0xFF;
 
-       if(!g_Charger_mode)
+        if(!g_Charger_mode)
 		return;
 	
 	if(Batt_ID_reday){
@@ -1550,12 +1551,16 @@ void LED_ChargerMode_Set(struct work_struct *dat){
 						led_type = 1;
 				}
 			}
+                if(charger_mode_cable_out)
+                {
+                        printk("Charger mode Cable Out! set LED off\n");
+                        led_type = 0;
+                }
 		if(OldLedType != led_type)
-			led_set_charger_mode(led_type);	
-		OldLedType = led_type;
+		        led_set_charger_mode(led_type);
+                OldLedType = led_type;
 	}else
 		schedule_delayed_work(&LED_ChargerMode, 1*HZ);
-		
 }
 //--0623 charger mode led--
 
@@ -2334,6 +2339,10 @@ static bool asus_battery_charging_limit(void)
 static int __smb358_path_suspend(struct smb358_charger *chip,bool suspend)
 {
 	int rc;
+
+	rc= smb358_enable_volatile_writes(smb358_dev);
+	if (rc < 0)
+		return rc;
 
 	rc=smb358_masked_write(chip,CMD_A_REG,CMD_A_CHG_SUSP_EN_MASK,suspend ? CMD_A_CHG_SUSP_EN_BIT : 0);
 
@@ -4149,8 +4158,8 @@ int setSMB358Charger(int usb_state)
 		ret=__smb358_path_suspend(smb358_dev,0);
 		if (ret){
                 BAT_DBG_E("%s: Set adapter to normal mode fail!\n",__FUNCTION__);
-				return -1;
-        }
+			//	return -1;
+                }
 	}
 	switch (usb_state) {
 	case AC_IN:
@@ -4257,6 +4266,8 @@ int setSMB358Charger(int usb_state)
 				}
 			}
 			JEITA_Flag=false;
+                        //set LED off in charger mode
+                        charger_mode_cable_out = true;
 			schedule_delayed_work(&LED_ChargerMode, 0*HZ);
 		}
 		break;
