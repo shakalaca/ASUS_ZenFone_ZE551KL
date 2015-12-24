@@ -3374,7 +3374,7 @@ static int smb358_soc_detect_batt_tempr_5wBZsku_zd550(int usb_state)
 
 	/*set charger current limit by kerwin*/
 	if(g_usb_state == AC_IN ){
-	    ret = Thermal_Policy(&thermal_policy_ic);
+	    ret = Thermal_Policy_ze550(&thermal_policy_ic);
 		if(ret < 0){
 			BAT_DBG_E(" %s: fail to set current according to Thermal Policy\n", __FUNCTION__);
 		}
@@ -3711,8 +3711,8 @@ static int Thermal_Policy(int *thermal_policy_current){
                                  //smb358_update_aicl_work(5);
                                  //wake_lock_timeout(&inok_wakelock, 5 * HZ);
                          } else if (Thermal_Level == 1){
-                                 BAT_DBG("Thermal_Level = %d, set Iusb_in current = 1200mA\n", Thermal_Level);
-								 *thermal_policy_current=CFG_CURRENT_LIMIT_SMB358_VALUE_1200;
+                                 BAT_DBG("Thermal_Level = %d, set Iusb_in current = 1000mA\n", Thermal_Level);
+								 *thermal_policy_current=CFG_CURRENT_LIMIT_SMB358_VALUE_1000;
                          } else if (Thermal_Level == 2){
                                  ret = get_bms_calculated_soc(&cap);
                                  if (ret < 0) {
@@ -3839,7 +3839,7 @@ void aicl_dete_worker(struct work_struct *dat)
 		/*if AICL result <= 500, then config input current but don't do JEITA*/
 		if(asus_PRJ_ID==ASUS_ZD550KL||asus_PRJ_ID==ASUS_ZE600KL){
 			BAT_DBG("%s: ZD550KL & ZE600KL flow\n", __FUNCTION__);
-                        if (aicl_result <= 500) {
+                  	if (aicl_result <= 500 && Thermal_Level < 2) {
 			        BAT_DBG("%s: don't do JEITA when aicl result(%dmA) <= 500mA.\n", __FUNCTION__, aicl_result);
 			        smb358_config_max_current(usb_state);
 				goto skip_jeita;
